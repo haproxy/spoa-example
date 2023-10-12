@@ -126,6 +126,7 @@ struct client {
 	struct list         outgoing_frames;
 
 	unsigned int        max_frame_size;
+	unsigned int        nbframes;
 	int                 status_code;
 
 	char               *engine_id;
@@ -162,6 +163,7 @@ static unsigned long  clicount         = 0;
 static int            server_port      = DEFAULT_PORT;
 static int            num_workers      = NUM_WORKERS;
 static unsigned int   max_frame_size   = MAX_FRAME_SIZE;
+static unsigned int   max_nb_frames    = 0;
 struct timeval        processing_delay = {0, 0};
 static bool           debug            = false;
 static bool           pipelining       = false;
@@ -1394,6 +1396,7 @@ read_frame_cb(evutil_socket_t fd, short events, void *arg)
 	int                n;
 
 	DEBUG(client->worker, "<%lu> %s", client->id, __FUNCTION__);
+
 	if ((frame = acquire_incoming_frame(client)) == NULL)
 		goto close;
 
@@ -1486,6 +1489,7 @@ read_frame_cb(evutil_socket_t fd, short events, void *arg)
 	return;
 
   process_frame:
+	client->nbframes++;
 	process_incoming_frame(frame);
 	client->incoming_frame = NULL;
 	return;
@@ -1570,8 +1574,26 @@ write_frame_cb(evutil_socket_t fd, short events, void *arg)
 			goto close;
 	}
 
-	release_frame(frame);
 	client->outgoing_frame = NULL;
+
+	if (max_nb_frames && client->nbframes >= max_nb_frames) {
+		event_del(&client->write_frame_event);
+		reset_frame(frame);
+		frame->worker = client->worker;
+		frame->engine = client->engine;
+		frame->client = client;
+		client->state = SPOA_ST_DISCONNECTING;
+		if (prepare_agentdicon(frame) < 0) {
+			LOG(client->worker, "Failed to encode DISCONNECT frame");
+			goto close;
+		}
+		DEBUG(client->worker, "<%lu> Max number of frames reached, close client", client->id);
+		write_frame(client, frame);
+		client->incoming_frame = NULL;
+		return;
+	}
+
+	release_frame(frame);
 	if (!client->async && !client->pipelining) {
 		event_del(&client->write_frame_event);
 		event_add(&client->read_frame_event, NULL);
@@ -1619,6 +1641,7 @@ accept_cb(int listener, short event, void *arg)
 	client->state          = SPOA_ST_CONNECTING;
 	client->status_code    = SPOE_FRM_ERR_NONE;
 	client->max_frame_size = max_frame_size;
+	client->nbframes       = 0;
 	client->engine         = NULL;
 	client->pipelining     = false;
 	client->async          = false;
@@ -1731,6 +1754,7 @@ usage(char *prog)
 		"                           The value is specified in milliseconds by default,\n"
 		"                           but can be in any other unit if the number is suffixed\n"
 		"                           by a unit (us, ms, s)\n"
+                "    -f <nb-frames>       Number of frames handled before closing the connetion (default: none)\n"
 		"\n"
 		"    Supported capabilities: fragmentation, pipelining, async\n",
 		prog, MAX_FRAME_SIZE, DEFAULT_PORT, NUM_WORKERS);
@@ -1744,13 +1768,16 @@ main(int argc, char **argv)
 	int                opt, i, fd = -1;
 
 	// TODO: add '-t <processing-time>' option
-	while ((opt = getopt(argc, argv, "hdm:n:p:c:t:")) != -1) {
+	while ((opt = getopt(argc, argv, "hdm:n:p:c:t:f:")) != -1) {
 		switch (opt) {
 			case 'h':
 				usage(argv[0]);
 				return EXIT_SUCCESS;
 			case 'd':
 				debug = true;
+				break;
+			case 'f':
+				max_nb_frames = atoi(optarg);
 				break;
 			case 'm':
 				max_frame_size = atoi(optarg);
