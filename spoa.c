@@ -1579,6 +1579,7 @@ write_frame_cb(evutil_socket_t fd, short events, void *arg)
 	if (max_nb_frames && client->nbframes >= max_nb_frames) {
 		event_del(&client->write_frame_event);
 		reset_frame(frame);
+		frame->buf   += 4;
 		frame->worker = client->worker;
 		frame->engine = client->engine;
 		frame->client = client;
